@@ -9,6 +9,7 @@ import hashlib
 import json
 import re
 import shutil
+import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -38,12 +39,69 @@ COLLECTION_NAME = "meridian_supply_chain"
 CHUNK_SIZE = 1200
 CHUNK_OVERLAP = 150
 
+# Gemini free tier: ~100 embed requests/min. Small batches + retries avoid 429s.
+EMBED_BATCH_SIZE = 8
+EMBED_BATCH_PAUSE_SEC = 1.2
+EMBED_MAX_RETRIES = 8
+
 _SPLITTER = RecursiveCharacterTextSplitter(
     chunk_size=CHUNK_SIZE,
     chunk_overlap=CHUNK_OVERLAP,
     separators=["\n\n", "\n", ". ", " ", ""],
     length_function=len,
 )
+
+
+def _is_rate_limit_error(exc: BaseException) -> bool:
+    text = str(exc).upper()
+    return (
+        "429" in text
+        or "RESOURCE_EXHAUSTED" in text
+        or "RATE LIMIT" in text
+        or "QUOTA" in text
+    )
+
+
+def _retry_delay_seconds(exc: BaseException, attempt: int) -> float:
+    """Prefer API retryDelay when present; otherwise exponential backoff."""
+    text = str(exc)
+    match = re.search(r"retry(?:Delay| in)\D*([0-9]+(?:\.[0-9]+)?)\s*s", text, re.I)
+    if match:
+        return max(float(match.group(1)) + 1.0, 5.0)
+    return min(5.0 * (2**attempt), 90.0)
+
+
+def _add_documents_with_retry(
+    store: Chroma,
+    chunks: list[Document],
+    ids: list[str],
+) -> None:
+    """Embed in small batches with backoff so free-tier Gemini does not 429."""
+    total = len(chunks)
+    for start in range(0, total, EMBED_BATCH_SIZE):
+        end = min(start + EMBED_BATCH_SIZE, total)
+        batch_docs = chunks[start:end]
+        batch_ids = ids[start:end]
+        last_exc: BaseException | None = None
+        for attempt in range(EMBED_MAX_RETRIES):
+            try:
+                store.add_documents(documents=batch_docs, ids=batch_ids)
+                last_exc = None
+                break
+            except Exception as exc:  # noqa: BLE001 — surface after retries
+                last_exc = exc
+                if not _is_rate_limit_error(exc) or attempt >= EMBED_MAX_RETRIES - 1:
+                    raise
+                delay = _retry_delay_seconds(exc, attempt)
+                print(
+                    f"Embed rate limit on chunks {start + 1}-{end}/{total}; "
+                    f"waiting {delay:.0f}s (attempt {attempt + 1}/{EMBED_MAX_RETRIES})..."
+                )
+                time.sleep(delay)
+        if last_exc is not None:
+            raise last_exc
+        if end < total:
+            time.sleep(EMBED_BATCH_PAUSE_SEC)
 
 
 def _cache_key() -> str:
@@ -242,8 +300,7 @@ def ingest_pdfs(
     ids = [_stable_id(c, i) for i, c in enumerate(chunks)]
     reset_caches()
     store = get_vectorstore()
-    # Larger batches = fewer embedding round-trips
-    store.add_documents(documents=chunks, ids=ids)
+    _add_documents_with_retry(store, chunks, ids)
 
     result = {
         "files": len(paths),

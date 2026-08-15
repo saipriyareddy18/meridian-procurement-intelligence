@@ -74,6 +74,29 @@ st.markdown(
 
 if "history" not in st.session_state:
     st.session_state.history = []
+if "pending_ask" not in st.session_state:
+    st.session_state.pending_ask = None
+
+
+def _run_ask(question: str, top_k: int) -> None:
+    """Ask once and keep a single card per question (no duplicate stack)."""
+    q = (question or "").strip()
+    if not q:
+        st.warning("Enter a question.")
+        return
+    if chunk_count_fast() == 0:
+        st.warning("Index documents first.")
+        return
+    with st.spinner("Retrieving from review + policy…"):
+        try:
+            result = ask(q, top_k=top_k)
+        except Exception as exc:
+            st.error(f"Error: {exc}")
+            return
+    # One entry per question — replace if already asked
+    st.session_state.history = [h for h in st.session_state.history if h.get("q") != q]
+    st.session_state.history.insert(0, {"q": q, **result})
+
 
 with st.sidebar:
     st.markdown("### Workspace")
@@ -113,42 +136,51 @@ with st.sidebar:
 
     if st.button("Index Documents", type="primary", use_container_width=True):
         try:
-            with st.spinner("Indexing…"):
+            with st.spinner("Indexing Meridian PDFs (may pause briefly on free-tier limits)…"):
                 reset_caches()
                 clear_answer_cache()
-                # Always index the two Meridian assignment PDFs from data/
-                meridian = sorted(
+                # Assignment uses only the two Meridian PDFs in data/
+                paths = sorted(
                     p
                     for p in DATA_DIR.glob("*.pdf")
-                    if "Meridian" in p.name or "meridian" in p.name.lower()
+                    if "meridian" in p.name.lower()
                 )
-                paths = list(meridian)
                 if uploaded_files:
                     for f in uploaded_files:
-                        # Don't let random uploads replace Meridian assignment docs
-                        if "Meridian" in f.name or f.name.lower().endswith(".pdf"):
-                            dest = DATA_DIR / f.name
-                            # Keep Meridian originals; save extras alongside
-                            if "Meridian" not in f.name:
-                                dest = DATA_DIR / f.name
-                                dest.write_bytes(f.getbuffer())
-                                paths.append(dest)
+                        if "meridian" not in f.name.lower():
+                            st.warning(
+                                f"Skipped {f.name} — index only Meridian assignment PDFs "
+                                "(extra files burn Gemini free-tier embed quota)."
+                            )
+                            continue
+                        dest = DATA_DIR / f.name
+                        dest.write_bytes(f.getbuffer())
+                        if dest not in paths:
+                            paths.append(dest)
                 if not paths:
                     st.warning("Meridian PDFs missing from data/. Re-download the assignment zip.")
                     st.stop()
                 result = ingest_pdfs(
                     paths,
-                    clear_first=True,
-                    skip_if_unchanged=False,
+                    clear_first=force_rebuild,
+                    skip_if_unchanged=not force_rebuild,
                 )
             if result.get("skipped"):
-                st.info(f"Already indexed · {result['chunks']} chunks")
+                st.info(f"Already indexed · {result['chunks']} chunks (uncheck Force rebuild)")
             else:
                 st.success(f"{result['files']} files · {result['chunks']} chunks")
                 st.rerun()
         except Exception as exc:
+            msg = str(exc)
             st.error(f"Indexing failed: {exc}")
-            st.caption("If you see SSL certificate errors, restart the app after saving .env (ALLOW_INSECURE_SSL=1).")
+            if "429" in msg or "RESOURCE_EXHAUSTED" in msg or "quota" in msg.lower():
+                st.warning(
+                    "Gemini free-tier embedding quota hit. Wait about **60 seconds**, "
+                    "then click **Index Documents** again (leave Force rebuild unchecked). "
+                    "Or create a new free key at https://aistudio.google.com/apikey"
+                )
+            else:
+                st.caption("If you see SSL errors, restart the app after saving the key.")
 
     st.caption("Bundled: Review Q1 + Policy Handbook")
 
@@ -168,36 +200,62 @@ EXAMPLES = [
 ]
 
 with right:
-    st.markdown('<div class="et-card"><h3>Assignment test questions</h3><p>Click to load into the question box.</p></div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="et-card"><h3>Assignment test questions</h3>'
+        "<p>Click a question to ask it once (Q1–Q10).</p></div>",
+        unsafe_allow_html=True,
+    )
     for i, ex in enumerate(EXAMPLES):
-        if st.button(f"Q{i+1}. {ex[:70]}{'…' if len(ex)>70 else ''}", key=f"ex_{i}", use_container_width=True):
+        if st.button(
+            f"Q{i+1}. {ex[:70]}{'…' if len(ex) > 70 else ''}",
+            key=f"ex_{i}",
+            use_container_width=True,
+        ):
             st.session_state["question_input"] = ex
+            st.session_state.pending_ask = ex
             st.rerun()
 
 with left:
-    st.markdown('<div class="et-card"><h3>Ask the knowledge base</h3><p>Answers cite document name and page. Cross-document questions pull from both PDFs.</p></div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="et-card"><h3>Ask the knowledge base</h3>'
+        "<p>Answers cite document name and page. Cross-document questions pull from both PDFs.</p></div>",
+        unsafe_allow_html=True,
+    )
     if "question_input" not in st.session_state:
         st.session_state["question_input"] = ""
     st.text_area("Question", height=120, key="question_input", label_visibility="collapsed")
     top_k = st.slider("Retrieved chunks (top_k)", 4, 8, 6)
-    ask_clicked = st.button("Generate answer", type="primary", use_container_width=True)
+    c1, c2 = st.columns(2)
+    with c1:
+        ask_clicked = st.button("Generate answer", type="primary", use_container_width=True)
+    with c2:
+        if st.button("Clear answers", use_container_width=True):
+            st.session_state.history = []
+            st.session_state.pending_ask = None
+            st.rerun()
 
-if ask_clicked:
-    q = (st.session_state.get("question_input") or "").strip()
-    if not q:
-        st.warning("Enter a question.")
-    elif chunk_count_fast() == 0:
-        st.warning("Index documents first.")
-    else:
-        with st.spinner("Retrieving from review + policy…"):
-            try:
-                result = ask(q, top_k=top_k)
-                st.session_state.history.insert(0, {"q": q, **result})
-            except Exception as exc:
-                st.error(f"Error: {exc}")
+# Run at most one pending/clicked ask per page load
+if st.session_state.pending_ask:
+    q = st.session_state.pending_ask
+    st.session_state.pending_ask = None
+    _run_ask(q, top_k)
+elif ask_clicked:
+    _run_ask(st.session_state.get("question_input") or "", top_k)
+
+# Drop accidental duplicates already in session (same Q repeated)
+_seen: set[str] = set()
+_unique: list = []
+for item in st.session_state.history:
+    qkey = (item.get("q") or "").strip().lower()
+    if qkey in _seen:
+        continue
+    _seen.add(qkey)
+    _unique.append(item)
+st.session_state.history = _unique
 
 if st.session_state.history:
     st.markdown("### Answers")
+    st.caption("One card per question — click Clear answers to reset.")
     for item in st.session_state.history:
         with st.container(border=True):
             st.markdown(f"**Q:** {item['q']}")
@@ -208,9 +266,15 @@ if st.session_state.history:
                 st.markdown("**Sources**")
                 for file_name, entries in grouped.items():
                     pages = ", ".join(str(e["page"]) for e in entries)
-                    st.markdown(f'<div class="source-row"><b>{file_name}</b> · pages {pages}</div>', unsafe_allow_html=True)
+                    st.markdown(
+                        f'<div class="source-row"><b>{file_name}</b> · pages {pages}</div>',
+                        unsafe_allow_html=True,
+                    )
                 if len(grouped) >= 2:
-                    st.markdown('<span class="ok-pill">Both documents cited</span>', unsafe_allow_html=True)
+                    st.markdown(
+                        '<span class="ok-pill">Both documents cited</span>',
+                        unsafe_allow_html=True,
+                    )
             bits = []
             if item.get("cached"):
                 bits.append("cached")
