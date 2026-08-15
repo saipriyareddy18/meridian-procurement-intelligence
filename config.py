@@ -16,7 +16,7 @@ load_dotenv()
 
 def _configure_ssl() -> None:
     """Windows networks that intercept HTTPS often break cert verification."""
-    if (os.getenv("ALLOW_INSECURE_SSL") or "1").strip() != "1":
+    if (os.getenv("ALLOW_INSECURE_SSL") or "0").strip() != "1":
         return
     try:
         ssl._create_default_https_context = ssl._create_unverified_context  # noqa: SLF001
