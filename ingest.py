@@ -240,6 +240,7 @@ def ingest_pdfs(
         per_file_chunks[src] = per_file_chunks.get(src, 0) + 1
 
     ids = [_stable_id(c, i) for i, c in enumerate(chunks)]
+    reset_caches()
     store = get_vectorstore()
     # Larger batches = fewer embedding round-trips
     store.add_documents(documents=chunks, ids=ids)

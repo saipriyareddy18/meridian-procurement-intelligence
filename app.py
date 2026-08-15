@@ -8,12 +8,17 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+# Fix Windows SSL issues BEFORE importing Gemini clients
+os.environ.setdefault("ALLOW_INSECURE_SSL", "1")
+os.environ.setdefault("PYTHONHTTPSVERIFY", "0")
+
 import streamlit as st
 from dotenv import load_dotenv, set_key
 
-load_dotenv()
+load_dotenv(override=True)
 
-from ingest import DATA_DIR, chunk_count_fast, ingest_data_folder, ingest_pdfs
+import config  # noqa: E402  — applies SSL patch
+from ingest import DATA_DIR, chunk_count_fast, ingest_data_folder, ingest_pdfs, reset_caches
 from rag import ask, clear_answer_cache
 
 st.set_page_config(
@@ -109,27 +114,41 @@ with st.sidebar:
     if st.button("Index Documents", type="primary", use_container_width=True):
         try:
             with st.spinner("Indexing…"):
+                reset_caches()
+                clear_answer_cache()
+                # Always index the two Meridian assignment PDFs from data/
+                meridian = sorted(
+                    p
+                    for p in DATA_DIR.glob("*.pdf")
+                    if "Meridian" in p.name or "meridian" in p.name.lower()
+                )
+                paths = list(meridian)
                 if uploaded_files:
-                    data_dir = Path("data")
-                    data_dir.mkdir(exist_ok=True)
-                    paths = []
                     for f in uploaded_files:
-                        dest = data_dir / f.name
-                        dest.write_bytes(f.getbuffer())
-                        paths.append(dest)
-                    result = ingest_pdfs(paths, clear_first=force_rebuild, skip_if_unchanged=not force_rebuild)
-                else:
-                    if not list(DATA_DIR.glob("*.pdf")):
-                        st.warning("Add PDFs to data/ or upload files.")
-                        st.stop()
-                    result = ingest_data_folder(clear_first=force_rebuild, skip_if_unchanged=not force_rebuild)
-            clear_answer_cache()
+                        # Don't let random uploads replace Meridian assignment docs
+                        if "Meridian" in f.name or f.name.lower().endswith(".pdf"):
+                            dest = DATA_DIR / f.name
+                            # Keep Meridian originals; save extras alongside
+                            if "Meridian" not in f.name:
+                                dest = DATA_DIR / f.name
+                                dest.write_bytes(f.getbuffer())
+                                paths.append(dest)
+                if not paths:
+                    st.warning("Meridian PDFs missing from data/. Re-download the assignment zip.")
+                    st.stop()
+                result = ingest_pdfs(
+                    paths,
+                    clear_first=True,
+                    skip_if_unchanged=False,
+                )
             if result.get("skipped"):
                 st.info(f"Already indexed · {result['chunks']} chunks")
             else:
                 st.success(f"{result['files']} files · {result['chunks']} chunks")
+                st.rerun()
         except Exception as exc:
             st.error(f"Indexing failed: {exc}")
+            st.caption("If you see SSL certificate errors, restart the app after saving .env (ALLOW_INSECURE_SSL=1).")
 
     st.caption("Bundled: Review Q1 + Policy Handbook")
 

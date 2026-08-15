@@ -1,7 +1,4 @@
-"""Provider settings: gemini (default) | openai | ollama.
-
-Campus guidance allows alternatives when OpenAI billing/keys are unavailable.
-"""
+"""Provider settings: gemini (default) | openai | ollama."""
 
 from __future__ import annotations
 
@@ -11,17 +8,34 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
+
+# Force local SSL workaround early (Windows antivirus / proxy breaks certs)
+if not os.getenv("ALLOW_INSECURE_SSL"):
+    os.environ["ALLOW_INSECURE_SSL"] = "1"
 
 
 def _configure_ssl() -> None:
-    """Windows networks that intercept HTTPS often break cert verification."""
-    if (os.getenv("ALLOW_INSECURE_SSL") or "0").strip() != "1":
+    """Disable cert verification when ALLOW_INSECURE_SSL=1 (needed on many Windows PCs)."""
+    if (os.getenv("ALLOW_INSECURE_SSL") or "1").strip() != "1":
         return
+
+    os.environ.setdefault("PYTHONHTTPSVERIFY", "0")
+    os.environ["CURL_CA_BUNDLE"] = ""
+    os.environ["REQUESTS_CA_BUNDLE"] = ""
+
     try:
         ssl._create_default_https_context = ssl._create_unverified_context  # noqa: SLF001
     except Exception:
         pass
+
+    try:
+        import urllib3
+
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    except Exception:
+        pass
+
     try:
         import httpx
 
@@ -29,11 +43,11 @@ def _configure_ssl() -> None:
         _async_init = httpx.AsyncClient.__init__
 
         def _patched_client_init(self, *args, **kwargs):  # type: ignore[no-untyped-def]
-            kwargs.setdefault("verify", False)
+            kwargs["verify"] = False
             return _client_init(self, *args, **kwargs)
 
         def _patched_async_init(self, *args, **kwargs):  # type: ignore[no-untyped-def]
-            kwargs.setdefault("verify", False)
+            kwargs["verify"] = False
             return _async_init(self, *args, **kwargs)
 
         httpx.Client.__init__ = _patched_client_init  # type: ignore[method-assign]
@@ -67,7 +81,7 @@ def get_gemini_api_key() -> str:
         return key
     raise RuntimeError(
         "GEMINI_API_KEY is missing. Get one at https://aistudio.google.com/apikey "
-        "and put it in .env"
+        "and put it in .env or the sidebar."
     )
 
 
