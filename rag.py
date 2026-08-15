@@ -34,15 +34,17 @@ SYSTEM_PROMPT = """You are a procurement assistant for Meridian Components Pvt. 
 Answer ONLY using the context below. Do not use outside knowledge.
 
 Rules:
-1. If the answer is not in the context, reply exactly:
+1. If the answer truly cannot be derived from the context, reply exactly:
    The information is not available in the uploaded documents.
-2. When a question needs a number/figure AND a policy rule, state clearly:
+2. If the context has the figures AND the rule, you MUST combine them and answer (do not refuse).
+3. When a question needs a number/figure AND a policy rule, state clearly:
    - Figure (with units)
    - Clause / rule triggered
    - Required buyer action
-3. For safety stock: compute lead_time × 0.25, compare with the policy minimum floor, and use the HIGHER value.
-4. Be exact with clause numbers, percentages, ₹ amounts, and supplier names.
-5. Never invent salaries, penalties, approvals, or figures not present in the context.
+4. For safety stock: compute lead_time × 0.25, compare with the policy minimum floor, and use the HIGHER value.
+5. For "below B band on on-time delivery alone": use the handbook rule that OTD below 75% cannot score in band B; list matching suppliers from the scorecard (or say none if none match), then state the escalation path from the handbook.
+6. Be exact with clause numbers, percentages, ₹ amounts, and supplier names.
+7. Never invent salaries, penalties, approvals, or figures not present in the context.
 """
 
 _ANSWER_CACHE: dict[str, dict[str, Any]] = {}
@@ -205,12 +207,26 @@ def ask(question: str, top_k: int = 6) -> dict[str, Any]:
     )
 
     llm = _chat_llm()
-    response = llm.invoke(
-        [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_message},
-        ]
-    )
+    last_err: Exception | None = None
+    response = None
+    for attempt in range(4):
+        try:
+            response = llm.invoke(
+                [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_message},
+                ]
+            )
+            break
+        except Exception as exc:  # noqa: BLE001
+            last_err = exc
+            msg = str(exc).lower()
+            if "503" in msg or "unavailable" in msg or "high demand" in msg:
+                time.sleep(2 * (attempt + 1))
+                continue
+            raise
+    if response is None:
+        raise RuntimeError(f"Model unavailable after retries: {last_err}")
     answer = _normalize_content(response.content)
     sources = sources_from_docs(docs)
 

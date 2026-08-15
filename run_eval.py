@@ -30,6 +30,10 @@ QUESTIONS = [
 
 
 def main() -> None:
+    import sys
+
+    sys.stdout.reconfigure(encoding="utf-8")
+
     if chunk_count_fast() == 0:
         print("Indexing data/ …")
         print(ingest_data_folder(clear_first=True, skip_if_unchanged=False))
