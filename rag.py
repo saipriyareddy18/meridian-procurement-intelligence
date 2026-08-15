@@ -162,6 +162,20 @@ def group_sources_by_document(sources: list[dict[str, Any]]) -> dict[str, list[d
     return grouped
 
 
+def _normalize_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                parts.append(str(item.get("text", "")))
+            else:
+                parts.append(str(item))
+        return "\n".join(p for p in parts if p).strip()
+    return str(content)
+
+
 def ask(question: str, top_k: int = 6) -> dict[str, Any]:
     ensure_provider_ready()
     key = _qkey(question, top_k)
@@ -197,7 +211,7 @@ def ask(question: str, top_k: int = 6) -> dict[str, Any]:
             {"role": "user", "content": user_message},
         ]
     )
-    answer = response.content if isinstance(response.content, str) else str(response.content)
+    answer = _normalize_content(response.content)
     sources = sources_from_docs(docs)
 
     result = {
@@ -229,5 +243,4 @@ def smoke_test_api() -> str:
     ensure_provider_ready()
     llm = _chat_llm()
     response = llm.invoke("Reply with exactly: OK")
-    content = response.content if isinstance(response.content, str) else str(response.content)
-    return content.strip()
+    return _normalize_content(response.content).strip()
